@@ -24,10 +24,13 @@ def health_check():
     return {"status": "ok", "service": "ScamShield AI Backend"}
 
 def analyze_url_signals(text: str, score: int, red_flags: list[str]) -> tuple[int, list[str]]:
+    if "hxxp://" in text or "hxxps://" in text:
+        score += 30
+        red_flags.append("Uses obfuscated/defanged 'hxxp' link notation commonly seen in threat lures.")
     if "http://" in text:
         score += 25
         red_flags.append("Uses unencrypted HTTP link (missing HTTPS security).")
-    if re.search(r"https?://\d{1,3}(?:\.\d{1,3}){3}", text):
+    if re.search(r"h(tt|xx)ps?://\d{1,3}(?:\.\d{1,3}){3}", text):
         score += 45
         red_flags.append("Links directly to a raw IP address instead of a legitimate domain.")
     if re.search(r"\.(xyz|top|tk|ml|ga|cf|gq|info|click|work|vip|buzz|online|site)\b", text):
@@ -36,16 +39,15 @@ def analyze_url_signals(text: str, score: int, red_flags: list[str]) -> tuple[in
     if any(s in text for s in ["bit.ly", "tinyurl", "t.co", "rb.gy", "cutt.ly", "shorturl", "is.gd"]):
         score += 30
         red_flags.append("Uses a URL shortener to hide the true destination.")
-    if re.search(r"(login|verify|secure|update|reset|claim|reward|kyc|auth|support|helpdesk)", text) and ("http" in text or "www." in text):
+    if re.search(r"(login|verify|secure|update|reset|claim|reward|kyc|auth|support|helpdesk|parcel|track)", text) and ("http" in text or "hxxp" in text or "www." in text):
         score += 25
-        red_flags.append("URL contains credential-harvesting or lure keywords.")
-    # Brand impersonation inside non-official domains
-    brands = ["meezan", "hbl", "ubl", "alfalah", "jazzcash", "easypaisa", "nayapay", "sadapay", "raast", "bisp", "daraz"]
-    official_domains = ["meezanbank.com", "hbl.com", "ubldigital.com", "bankalfalah.com", "jazzcash.com.pk", "easypaisa.com.pk", "nayapay.com", "sadapay.pk", "daraz.pk"]
-    if ("http" in text or "www." in text) and any(b in text for b in brands):
+        red_flags.append("URL contains credential-harvesting or delivery-lure keywords.")
+    brands = ["meezan", "hbl", "ubl", "alfalah", "jazzcash", "easypaisa", "nayapay", "sadapay", "raast", "bisp", "daraz", "tcs", "leopards"]
+    official_domains = ["meezanbank.com", "hbl.com", "ubldigital.com", "bankalfalah.com", "jazzcash.com.pk", "easypaisa.com.pk", "nayapay.com", "sadapay.pk", "daraz.pk", "tcsexpress.com", "leopardscourier.com"]
+    if ("http" in text or "hxxp" in text or "www." in text) and any(b in text for b in brands):
         if not any(od in text for od in official_domains):
             score += 40
-            red_flags.append("Impersonates a trusted bank, wallet, or platform on an unofficial domain.")
+            red_flags.append("Impersonates a trusted bank, wallet, or courier on an unofficial domain.")
     return score, red_flags
 
 @app.post("/scan")
@@ -62,9 +64,10 @@ def scan_content(req: ScanRequest):
     red_flags = []
     lower_text = raw_text.lower()
 
-    # Live URL inspection
     if input_type == "url":
-        target_url = raw_text if lower_text.startswith(("http://", "https://")) else "http://" + raw_text
+        target_url = raw_text.replace("hxxp://", "http://").replace("hxxps://", "https://")
+        if not target_url.lower().startswith(("http://", "https://")):
+            target_url = "http://" + target_url
         lower_text = target_url.lower()
         try:
             res = requests.get(target_url, timeout=4, headers={"User-Agent": "Mozilla/5.0"})
@@ -74,10 +77,8 @@ def scan_content(req: ScanRequest):
             score += 25
             red_flags.append("Website could not be reached or blocked automated inspection.")
 
-    # Inspect links whether in URL mode, Message mode, or Store mode
     score, red_flags = analyze_url_signals(lower_text, score, red_flags)
 
-    # Store-specific trust signals
     if input_type == "store":
         if "cod" not in lower_text and "cash on delivery" not in lower_text:
             score += 20
@@ -89,14 +90,14 @@ def scan_content(req: ScanRequest):
             score += 15
             red_flags.append("Missing clear return/exchange policy or physical store details.")
 
-    # Behavioral & Pattern Detection (catches unexpected phrasings + Roman Urdu)
     pattern_rules = [
         (r"\b(otp|mpin|pin\s*code|cvv|passcode|password)\b", 40, "Requests confidential authentication credentials (OTP, PIN, or password)."),
         (r"\b(cnic|id\s*card|nic\s*number)\b", 30, "Requests sensitive CNIC / national identity details."),
-        (r"\b(advance\s*payment|registration\s*fee|processing\s*fee|security\s*deposit|fee\s*jama|pehle\s*payment)\b", 35, "Demands upfront payment or processing fee before delivery/service."),
+        (r"\b(advance\s*payment|registration\s*fee|processing\s*fee|return\s*fees?|security\s*deposit|fee\s*jama|pehle\s*payment)\b", 35, "Demands upfront payment, processing fee, or fake return fee."),
+        (r"\b(parcel\s*(is\s*)?(on\s*)?hold|incomplete\s*address|delivery\s*(alert|failed|suspended)|customs\s*fee)\b", 30, "Uses fake parcel-hold or failed-delivery smishing lure."),
         (r"\b(urgent|immediately|act\s*now|abhi|foran|within\s*\d+\s*(hour|hr|minute|min)s?)\b", 20, "Uses artificial urgency or a countdown deadline to induce panic."),
         (r"\b(account\s*(blocked|suspended|restricted|closed|frozen|band)|unauthorized\s*(login|activity))\b", 35, "Uses fake account-suspension or security-alert scare tactics."),
-        (r"\b(verify\s*your|confirm\s*your|update\s*your\s*(account|kyc|details)|click\s*(here|below|link))\b", 25, "Prompts you to click a link or verify sensitive account details."),
+        (r"\b(verify\s*your|confirm\s*your|update\s*your\s*(account|kyc|details)|click\s*(here|below|link))\b", 25, "Prompts you to click a link or verify sensitive details."),
         (r"\b(prize|lottery|winner|lucky\s*draw|inaam|jeeto|benazir|bisp|ehsaas|free\s*(cash|money|iphone|laptop))\b", 30, "Uses unsolicited prize, giveaway, or relief-fund bait."),
         (r"\b(no\s*return|no\s*refund|no\s*exchange|non\s*refundable)\b", 25, "Enforces a strict no-return / no-refund policy."),
         (r"\b(only\s*\d+\s*left|limited\s*slots|last\s*chance)\b", 15, "Uses artificial scarcity pressure."),
@@ -108,7 +109,6 @@ def scan_content(req: ScanRequest):
             score += points
             red_flags.append(reason)
 
-    # Shouting / excessive caps check on longer messages
     letters = [c for c in raw_text if c.isalpha()]
     if len(letters) >= 20 and sum(1 for c in letters if c.isupper()) / len(letters) > 0.65:
         score += 15
