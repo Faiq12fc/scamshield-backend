@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from urllib.parse import urlparse
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -18,6 +19,33 @@ app.add_middleware(
 class ScanRequest(BaseModel):
     type: str      # "message", "url", or "store"
     content: str
+
+TRUSTED_STORES = {
+    # Marketplaces & Tech / Electronics
+    "daraz.pk", "priceoye.pk", "telemart.pk", "shophive.com",
+    "homeshopping.pk", "ishopping.pk", "symbios.pk", "czone.com.pk",
+    "paklap.pk", "mistore.pk", "zerolifestyle.co", "danytech.com.pk",
+    "audionic.co", "fasterpakistan.com",
+
+    # Fashion, Apparel & Footwear
+    "khaadi.com", "gulahmedshop.com", "junaidjamshed.com", "sapphireonline.pk",
+    "outfitters.com.pk", "breakout.com.pk", "limelight.pk", "bonanzasatrangi.com",
+    "nishatlinen.com", "zellbury.com", "beechtree.pk", "edenrobe.com",
+    "saya.pk", "sanasafinaz.com", "alkaramstudio.com", "mariab.pk",
+    "ethnic.pk", "generation.com.pk", "crossstitch.pk", "sowears.net",
+    "lamaretail.com", "uniworthshop.com", "monark.com.pk", "furorjeans.com",
+    "engine.com.pk", "cougar.com.pk", "ndure.com", "stylo.pk",
+    "borjan.com.pk", "servis.pk", "bata.com.pk", "insignia.com.pk",
+    "ecs.com.pk", "unze.com.pk", "exportleftovers.com",
+
+    # Beauty, Health & Groceries
+    "bagallery.com", "naheed.pk", "alfatah.pk", "chaseup.com.pk",
+    "metro-online.pk", "imtiaz.com.pk", "jenpharm.com", "nutrifactor.com.pk",
+    "vegas.pk", "highfy.pk", "cozmetica.pk", "daraz.com.np",
+
+    # Global Marketplaces
+    "amazon.com", "aliexpress.com", "ebay.com", "temu.com", "etsy.com"
+}
 
 @app.get("/")
 def health_check():
@@ -63,11 +91,13 @@ def scan_content(req: ScanRequest):
     score = 0
     red_flags = []
     lower_text = raw_text.lower()
+    parsed_host = ""
 
-    if input_type == "url":
+    if input_type == "url" or (input_type == "store" and ("http://" in lower_text or "https://" in lower_text or "www." in lower_text or "." in lower_text)):
         target_url = raw_text.replace("hxxp://", "http://").replace("hxxps://", "https://")
         if not target_url.lower().startswith(("http://", "https://")):
             target_url = "http://" + target_url
+        parsed_host = (urlparse(target_url).hostname or "").lower()
         lower_text = target_url.lower()
         try:
             res = requests.get(target_url, timeout=4, headers={"User-Agent": "Mozilla/5.0"})
@@ -80,15 +110,24 @@ def scan_content(req: ScanRequest):
     score, red_flags = analyze_url_signals(lower_text, score, red_flags)
 
     if input_type == "store":
-        if "cod" not in lower_text and "cash on delivery" not in lower_text:
-            score += 20
-            red_flags.append("No Cash on Delivery (COD) option mentioned.")
-        if any(p in lower_text for p in ["dm for price", "dm to order", "inbox for price", "whatsapp to order"]):
-            score += 20
-            red_flags.append("Forces private DM ordering with no transparent checkout.")
-        if not any(p in lower_text for p in ["return", "exchange", "refund", "address", "location"]):
-            score += 15
-            red_flags.append("Missing clear return/exchange policy or physical store details.")
+        is_verified_store = any(
+            parsed_host == ts or parsed_host.endswith("." + ts)
+            for ts in TRUSTED_STORES
+        ) if parsed_host else any(ts in lower_text for ts in TRUSTED_STORES)
+
+        if is_verified_store:
+            score = 0
+            red_flags = []
+        else:
+            if "cod" not in lower_text and "cash on delivery" not in lower_text:
+                score += 20
+                red_flags.append("No Cash on Delivery (COD) option mentioned.")
+            if any(p in lower_text for p in ["dm for price", "dm to order", "inbox for price", "whatsapp to order"]):
+                score += 20
+                red_flags.append("Forces private DM ordering with no transparent checkout.")
+            if not any(p in lower_text for p in ["return", "exchange", "refund", "address", "location"]):
+                score += 15
+                red_flags.append("Missing clear return/exchange policy or physical store details.")
 
     pattern_rules = [
         (r"\b(otp|mpin|pin\s*code|cvv|passcode|password)\b", 40, "Requests confidential authentication credentials (OTP, PIN, or password)."),
